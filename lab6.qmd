@@ -1,11 +1,7 @@
 ---
-project: 
-  title: "csu-ess-lab6"
-  output-dir: docs
-  type: website
-format: 
-  html: 
-    self-contained: true
+title: "Lab 6"
+format: html
+editor: visual
 ---
 
 
