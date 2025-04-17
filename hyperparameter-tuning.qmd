@@ -1,0 +1,345 @@
+---
+title: "hyperparameter-tuning"
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(powerjoin)
+library(skimr)
+library(visdat)
+library(ggpubr)
+library(rsample)
+library(recipes)
+library(workflows)
+library(workflowsets)
+library(tune)
+library(yardstick)
+library(parsnip)
+library(dials)
+
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+
+remote_files <- glue::glue('{root}/camels_{types}.txt')
+local_files  <- glue::glue('data/camels_{types}.txt')
+
+walk2(remote_files, local_files, download.file, quiet = TRUE)
+
+camels_list <- map(local_files, read_delim, show_col_types = FALSE)
+
+camels <- reduce(camels_list, power_full_join, by = "gauge_id")
+
+```
+```{r}
+camels_clean <- camels %>%
+  filter(!is.na(gauge_lat) & !is.na(gauge_lon)) %>%
+  distinct()
+
+camels_clean <- camels_clean %>%
+mutate(across(where(is.character), as.factor))
+
+skim(camels_clean)
+vis_dat(camels_clean)
+
+ggscatter(camels_clean, x = "gauge_lon", y = "gauge_lat", 
+          color = "blue", add = "none", title = "Gauge Locations")
+
+```
+
+```{r}
+camels_clean %>% 
+  select(gauge_id, gauge_lat, gauge_lon) %>%
+  head()
+
+```
+
+```{r}
+set.seed(123)
+
+split <- initial_split(camels_clean, prop = 0.8)
+
+camels_train <- training(split)
+camels_test  <- testing(split)
+
+nrow(camels_train)  
+nrow(camels_test)   
+
+```
+
+```{r}
+camels_recipe <- recipe(q_mean ~ ., data = camels_train) %>%
+  step_rm(gauge_lat, gauge_lon) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_zv(all_predictors())
+
+prep(camels_recipe) %>% 
+  juice() %>% 
+  glimpse()
+
+```
+```{r}
+cv_folds <- vfold_cv(camels_train, v = 10)
+
+cv_folds
+
+```
+
+```{r}
+linear_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+```
+
+```{r}
+rf_model <- rand_forest(mtry = tune(), min_n = tune(), trees = 500) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+```
+
+```{r}
+xgb_model <- boost_tree(trees = 500, learn_rate = tune(), mtry = tune(), tree_depth = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+```
+
+```{r}
+camels_train <- camels_train %>%
+  filter(!is.na(q_mean), !is.infinite(q_mean))
+
+set.seed(123)
+cv_folds <- vfold_cv(camels_train, v = 10)
+
+camels_recipe <- recipe(q_mean ~ ., data = camels_train) %>%
+  step_rm(gauge_id, gauge_lat, gauge_lon) %>%         
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%  
+  step_zv(all_predictors()) %>%                       
+  step_normalize(all_numeric_predictors())
+
+```
+
+```{r}
+model_list <- list(
+  linear = linear_model,
+  xgb    = xgb_model   
+)
+
+model_workflows <- workflow_set(
+  preproc = list(camels_recipe),
+  models = model_list
+)
+
+set.seed(123)
+model_results <- model_workflows %>%
+  workflow_map("tune_grid", resamples = cv_folds, grid = 3, metrics = metric_set(rmse, rsq))
+```
+
+```{r}
+autoplot(model_results)
+rank_results(model_results, rank_metric = "rmse")
+
+```
+
+## Based on the RMSE and R-squared metrics, the linear regression model performed the best. It had the lowest RMSE, which means it made the most accurate predictions on average, and the highest R-squared, indicating it explained the most variance in the outcome (q_mean). Also, the performance was very consistent across cross-validation folds.
+
+## The selected model is a linear regression model, using the lm engine in regression mode. It probably did well because the relationship between the predictors and streamflow (q_mean) may be mostly linear, or because linear models generalize well when the data is clean, high-quality, and not overly complex. The simplicity of the model helps prevent overfitting and makes the results easier to interpret.
+
+
+# Model Tuning
+
+```{r}
+rf_model <- rand_forest(
+  trees = tune(),   
+  mtry = tune(),    
+  min_n = tune()    
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")  
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),  
+  mtry(range = c(1, 10)),      
+  min_n(range = c(2, 10)),     
+  levels = 3                   
+)
+
+recipe <- recipe(q_mean ~ ., data = camels_train)
+
+rf_workflow <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(recipe)
+
+cv_folds <- vfold_cv(camels_train, v = 10)
+
+tuned_rf <- rf_workflow %>%
+  tune_grid(
+    resamples = cv_folds,   
+    grid = rf_grid,         
+    metrics = metric_set(rmse, rsq)  
+  )
+
+```
+
+```{r}
+xgb_tuned <- boost_tree(
+  trees = 500,                  
+  learn_rate = tune(),          
+  mtry = tune(),                
+  tree_depth = tune()           
+) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+```
+
+```{r}
+wf_tune <- workflow() %>%
+  add_model(xgb_tuned) %>%
+  add_recipe(camels_recipe)
+
+```
+
+```{r}
+dials <- extract_parameter_set_dials(wf_tune)
+dials <- finalize(dials, camels_train)
+
+my.grid <- grid_space_filling(dials, size = 25)
+
+dials$object
+```
+
+```{r}
+model_params <- tune_grid(
+  wf_tune,
+  resamples = cv_folds,
+  grid = my.grid,
+  metrics = metric_set(rmse, rsq, mae),
+  control = control_grid(save_pred = TRUE)
+)
+```
+
+```{r}
+autoplot(model_params)
+```
+
+```{r}
+collect_metrics(model_params)
+```
+```{r}
+show_best(model_params, metric = "mae", n = 5)
+```
+
+```{r}
+hp_best <- select_best(model_params, metric = "mae")
+
+wf_final <- finalize_workflow(wf_tune, hp_best)
+
+camels_all <- camels_clean %>%
+  filter(!is.na(q_mean), !is.infinite(q_mean))  
+
+set.seed(123)
+split <- initial_split(camels_all, prop = 0.8)
+
+camels_train <- training(split)
+camels_test <- testing(split)
+```
+
+```{r}
+final_model <- last_fit(wf_final, split = split)
+collect_metrics(final_model)
+
+```
+
+```{r}
+summary(camels_test$q_mean)
+any(is.infinite(camels_test$q_mean))
+any(is.na(camels_test$q_mean))
+```
+
+```{r}
+bad_cols <- camels_test %>%
+  select_if(~ any(is.na(.)) | any(is.infinite(.))) %>%
+  names()
+
+bad_cols
+```
+
+```{r}
+str(camels_test)
+```
+
+```{r}
+camels_recipe <- recipe(q_mean ~ ., data = camels_train) %>%
+  step_rm(gauge_id, gauge_lat, gauge_lon,
+          geol_2nd_class, geol_porostiy, root_depth_50, root_depth_99) %>%         
+  step_unknown(all_nominal_predictors()) %>%
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) %>%  
+  step_zv(all_predictors()) %>%                       
+  step_normalize(all_numeric_predictors())
+```
+
+```{r}
+wf_tune <- workflow() %>%
+  add_model(xgb_tuned) %>%
+  add_recipe(camels_recipe)
+
+wf_final <- finalize_workflow(wf_tune, hp_best)
+
+final_model <- last_fit(wf_final, split = split)
+
+collect_metrics(final_model)
+```
+
+```{r}
+final_predictions <- collect_predictions(final_model)
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(final_predictions, aes(x = .pred, y = q_mean)) +
+  geom_point(alpha = 0.6, color = "#1f77b4") +
+  geom_smooth(method = "lm", se = FALSE, color = "red") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  labs(
+    title = "Final XGBoost Predictions vs Actual q_mean",
+    x = "Predicted q_mean",
+    y = "Actual q_mean"
+  ) +
+  theme_minimal()
+
+```
+
+```{r}
+final_fit <- fit(wf_final, data = camels_all)
+
+augmented <- augment(final_fit, new_data = camels_all)
+
+augmented <- augmented %>%
+  mutate(residual = (q_mean - .pred)^2)
+```
+
+```{r}
+p1 <- ggplot(augmented, aes(x = gauge_lon, y = gauge_lat, color = .pred)) +
+  geom_point(size = 2) +
+  labs(title = "Predicted q_mean Across Sites") +
+  scale_color_viridis_c() +
+  coord_fixed()
+
+p2 <- ggplot(augmented, aes(x = gauge_lon, y = gauge_lat, color = residual)) +
+  geom_point(size = 2) +
+  labs(title = "Residuals (Squared Error)") +
+  scale_color_viridis_c() +
+  coord_fixed()
+
+library(patchwork)
+p1 + p2
+
+ggsave("q_mean_predictions_map.png", p1 + p2, width = 10, height = 5)
+```
+
+
+
+
