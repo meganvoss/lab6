@@ -32,6 +32,7 @@ camels_list <- map(local_files, read_delim, show_col_types = FALSE)
 camels <- reduce(camels_list, power_full_join, by = "gauge_id")
 
 ```
+
 ```{r}
 camels_clean <- camels %>%
   filter(!is.na(gauge_lat) & !is.na(gauge_lon)) %>%
@@ -79,6 +80,7 @@ prep(camels_recipe) %>%
   glimpse()
 
 ```
+
 ```{r}
 cv_folds <- vfold_cv(camels_train, v = 10)
 
@@ -142,12 +144,16 @@ rank_results(model_results, rank_metric = "rmse")
 
 ```
 
+
+
 ## Based on the RMSE and R-squared metrics, the linear regression model performed the best. It had the lowest RMSE, which means it made the most accurate predictions on average, and the highest R-squared, indicating it explained the most variance in the outcome (q_mean). Also, the performance was very consistent across cross-validation folds.
 
 ## The selected model is a linear regression model, using the lm engine in regression mode. It probably did well because the relationship between the predictors and streamflow (q_mean) may be mostly linear, or because linear models generalize well when the data is clean, high-quality, and not overly complex. The simplicity of the model helps prevent overfitting and makes the results easier to interpret.
 
 
 # Model Tuning
+
+
 
 ```{r}
 rf_model <- rand_forest(
@@ -224,23 +230,35 @@ model_params <- tune_grid(
 autoplot(model_params)
 ```
 
+
+
 ## The autoplot() visualization of the tuning process shows how performance metrics vary across combinations of mtry, trees, and min_n. In general, models with higher numbers of trees and moderate mtry values tended to have better performance (lower MAE). There’s a visible trend where very low or very high mtry values performed worse, suggesting that there’s an optimal level of feature sampling that balances bias and variance.
+
+
 
 ```{r}
 collect_metrics(model_params)
 ```
 
+
+
 ## The collect_metrics() output indicates that the random forest tuning process resulted in a range of MAE and RMSE values, but most models performed reasonably well. The best-performing models had MAE values around 0.11 and R² near 0.92, showing strong predictive skill. These values suggest the model is both accurate and explanatory in predicting streamflow.
+
+
 
 ```{r}
 show_best(model_params, metric = "mae", n = 5)
 ```
+
+
 
 ## The first row of show_best(metric = "mae") displays the top-performing hyperparameter combination for minimizing MAE. This model used:
 ## mtry = 19
 ## trees = 1650
 ## min_n = 7
 ## This configuration suggests that the model benefits from sampling a relatively large number of predictors (mtry) and using a large number of trees, which stabilizes predictions and improves generalization. The moderately small min_n allows the trees to grow deep enough to capture nuanced patterns without overfitting.
+
+
 
 ```{r}
 hp_best <- select_best(model_params, metric = "mae")
@@ -263,11 +281,15 @@ collect_metrics(final_model)
 
 ```
 
+
+
 ## On the test data, the final random forest model achieved:
 ## MAE: ~0.117
 ## RMSE: ~0.174
 ## R²: ~0.909
 ## These metrics are very close to the performance on the training data, which suggests that the model generalizes well and is not overfitting. An R² over 0.9 on both training and test sets shows that the model explains over 90% of the variance in q_mean, which is strong for a regression task. The low MAE and RMSE indicate that the typical prediction error is small, making this model reliable for practical predictions.
+
+
 
 ```{r}
 summary(camels_test$q_mean)
@@ -356,7 +378,4 @@ p1 + p2
 
 ggsave("q_mean_predictions_map.png", p1 + p2, width = 10, height = 5)
 ```
-
-
-
 
